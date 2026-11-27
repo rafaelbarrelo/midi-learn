@@ -309,7 +309,12 @@
     .tag.fb svg { display: block; }
     .tag { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 10px; background: var(--well); white-space: nowrap; }
     .tag.global { background: var(--ink); color: var(--tape); }
+    .tag.shift { background: var(--hit, var(--yellow)); color: var(--on-hit, #000); }
     :root[data-tone="dark"] .tag.global { background: #fff; color: #000; }
+    #shift-pill[aria-pressed="true"] { background: var(--hit, var(--yellow)); color: var(--on-hit, #000); }
+    .shift-pop { width: min(300px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 12px; }
+    .shift-pop .s-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 600; }
+    .shift-pop .s-btn { display: flex; align-items: center; gap: 6px; }
     .more { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; }
     .more:hover { background: var(--well); }
     .more svg { width: 14px; height: 14px; transition: transform 300ms var(--spring); }
@@ -488,6 +493,7 @@
     :root[data-skin="luna"] .map.hit .src, :root[data-skin="luna"] .mighty.hit .src { background: var(--luna-amber); color: #000; }
     :root[data-skin="luna"] .map.learned .src { background: var(--luna-steel); color: #fff; }
     :root[data-skin="luna"] .tag.global { background: var(--luna-steel); color: #fff; }
+    :root[data-skin="luna"] .tag.shift, :root[data-skin="luna"] #shift-pill[aria-pressed="true"] { background: var(--luna-amber); color: #000; }
     :root[data-skin="luna"] .map { border-bottom-color: var(--luna-rule); }
     :root[data-skin="luna"] .map.open { border-radius: 2px; background: var(--luna-row); box-shadow: inset 0 0 0 1px var(--luna-steel-edge); }
     :root[data-skin="luna"] .edit select { border-bottom-color: var(--luna-rule); color: var(--luna-fg); }
@@ -539,6 +545,7 @@
     <div class="chip" id="midi-chip" role="button" tabindex="0" aria-haspopup="listbox" title="Which MIDI input MIDI Learn listens to">
       <i class="dot" id="midi-dot"></i><span class="k">MIDI</span><select id="device" aria-label="MIDI input" tabindex="-1"></select>
     </div>
+    <button class="pill" id="shift-pill" aria-haspopup="dialog" aria-pressed="false" title="Shift modifier: assign a Shift button and choose Hold or Toggle">Shift</button>
     <button class="pill" id="open-templates" aria-haspopup="dialog" title="Save or load your whole controller layout: every section">Templates</button>
     </div>
   </header>
