@@ -13,6 +13,11 @@
     "html": "index.html",
     "icon": "icon.png",
     "target": "browser",
+    "targets": [
+        "browser",
+        "window"
+    ],
+    "run_hidden": true,
     "width": 360,
     "height": 720,
     "description": "Map any MIDI controller to faders, plugin parameters and commands. Mappings are saved with the session.",
