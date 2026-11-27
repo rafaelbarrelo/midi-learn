@@ -14,6 +14,7 @@ const KEYS = {
   focus: 'midilearn.focus', // Channel Focus mappings: one controller layout for every session
   plugins: 'midilearn.plugins', // plugin maps: one map per plugin type, for whichever instance has the focus
   mighty: 'midilearn.mighty', // Click & Turn: one knob that drives whatever was touched last (first called the Mighty Knob; 'mighty' in code and storage, so saved setups carry over)
+  shift: 'midilearn.shift', // Shift modifier button ({ source, mode: 'hold' | 'toggle' })
   templates: 'midilearn.templates',
 };
 
@@ -471,6 +472,11 @@ const AddOnLogic = {
     return `${src.device ?? '*'}|${src.type}|${src.channel ?? '*'}|${src.number}`;
   },
 
+  /** Identity of a mapping's source + shift layer, so Normal and Shift can share a MIDI button. */
+  mappingKey(m) {
+    return `${AddOnLogic.sourceKey(m.source)}|${m.shift ? 'S' : ''}`;
+  },
+
   /**
    * A source typed in by hand, or undefined when it is not valid. `number` may be a note name
    * for notes ("C3"); `channel` is 1..16, or null/'' for any channel. Pitch bend has no number.
@@ -789,6 +795,9 @@ class Mapper {
     this.mighty = null; // Click & Turn mapping, if one is learned
     this.mightyPath = undefined; // the control it drives: the one touched last in LUNA
     this.mightyHold = false; // true: stay on the current control, ignore touches
+    this.shift = null; // Shift modifier: { source, mode: 'hold' | 'toggle' } | null
+    this.shiftActive = false; // true while the Shift layer is active
+    this.shiftEdge = { value: 0, at: -Infinity };
     this.activity = new Map(); // mapping id -> when it last moved
     this.lastSource = undefined; // the last message seen, for the UI
     this.edges = new Map(); // source key -> last value, for rising edges
@@ -888,6 +897,7 @@ class Mapper {
     this.focusMappings = this.readKind('focus') ?? [];
     this.mighty = this.readKind('mighty') ?? null;
     this.pluginMappings = this.readKind('plugins') ?? [];
+    this.shift = this.storage.get(KEYS.shift) ?? null;
     // Channel Focus mappings made before feedback defaulted on, and never switched either way,
     // get it now. One the user turned off (feedback: false) stays off.
     let migrated = false;
@@ -1069,6 +1079,62 @@ class Mapper {
   /** Keep Click & Turn on its current control (true), or let it follow touches again. */
   setMightyHold(on) {
     this.mightyHold = !!on;
+    this.emit();
+  }
+
+  // ---- Shift modifier -----------------------------------------------------------------------
+
+  /** Configure the MIDI Shift modifier button ({ source, mode: 'hold' | 'toggle' }). */
+  setShift(source, mode = this.shift?.mode ?? 'hold') {
+    this.shift = source ? { source, mode: mode === 'toggle' ? 'toggle' : 'hold' } : null;
+    if (!this.shift) this.shiftActive = false;
+    this.shiftEdge = { value: 0, at: -Infinity };
+    this.save();
+    this.emit();
+  }
+
+  /** Switch the Shift button between Hold (momentary) and Toggle (latch). */
+  setShiftMode(mode) {
+    if (!this.shift) return;
+    this.shift.mode = mode === 'toggle' ? 'toggle' : 'hold';
+    this.shiftActive = false;
+    this.shiftEdge = { value: 0, at: -Infinity };
+    this.save();
+    this.emit();
+  }
+
+  /** Manually turn the Shift layer on or off (for testing or one-handed learning). */
+  setShiftActive(on) {
+    const next = !!on;
+    if (this.shiftActive === next) return;
+    this.shiftActive = next;
+    this.syncFeedback();
+    this.emit();
+  }
+
+  /** Remove the Shift modifier button assignment. */
+  clearShift() {
+    this.setShift(null);
+  }
+
+  /** Update `shiftActive` from an incoming message matching the Shift button. */
+  handleShift(msg) {
+    const now = this.now();
+    const prev = this.shiftEdge;
+    this.shiftEdge = { value: msg.value, at: now };
+    const discrete = msg.type === 'note' || msg.type === 'program';
+    let next = this.shiftActive;
+    if (this.shift.mode === 'toggle' || msg.type === 'program') {
+      const repeat = !discrete && msg.value >= 0.5 && msg.value === prev.value && now - prev.at >= REPEAT_MS;
+      const pressed = discrete ? !!msg.on : (msg.value >= 0.5 && prev.value < 0.5) || repeat;
+      if (pressed) next = !this.shiftActive;
+    } else {
+      next = msg.type === 'note' ? !!msg.on : msg.value >= 0.5;
+    }
+    if (next !== this.shiftActive) {
+      this.shiftActive = next;
+      this.syncFeedback();
+    }
     this.emit();
   }
 
@@ -1254,9 +1320,9 @@ class Mapper {
     this.lastTouchPath = undefined;
     this.learning = on;
     this.learnMode = on ? mode : 'map';
-    // Latch: keep learning after each mapping, for several in a row. Click & Turn is one knob, so
-    // there is nothing to latch there.
-    this.latch = on && latch && mode !== 'mighty';
+    // Latch: keep learning after each mapping, for several in a row. Click & Turn and Shift are
+    // single controls, so there is nothing to latch there.
+    this.latch = on && latch && mode !== 'mighty' && mode !== 'shift';
     // Click & Turn needs only a source: its target is whatever gets touched later.
     this.pending = { target: on && mode === 'mighty' ? AddOnLogic.mightyTarget() : undefined, source: undefined };
     this.emit();
@@ -1267,13 +1333,13 @@ class Mapper {
    * control after another. Can be switched while learning. Click & Turn is one knob: no hold.
    */
   setHold(on) {
-    this.latch = !!on && this.learnMode !== 'mighty';
+    this.latch = !!on && this.learnMode !== 'mighty' && this.learnMode !== 'shift';
     this.emit();
   }
 
   /** Choose a target, from LUNA or from the add-on's own list. Completes a learn when a source waits. */
   pick(target) {
-    if (this.learnMode === 'mighty') return false; // nothing to pick: it follows touches
+    if (this.learnMode === 'mighty' || this.learnMode === 'shift') return false; // nothing to pick
     if (this.learnMode === 'plugin') {
       // A plugin map learns a parameter of a plugin type, from any instance of it.
       target = this.pluginTargetOf(target);
@@ -1337,6 +1403,21 @@ class Mapper {
   handle(msg, device) {
     const source = { device: device ?? null, type: msg.type, channel: msg.channel, number: msg.number };
     this.lastSource = { ...source, value: msg.value, raw: msg.raw, at: this.now() };
+    if (this.learning && this.learnMode === 'shift') {
+      if (msg.type === 'cc14' || msg.type === 'nrpn') return;
+      if (!(msg.type === 'note' && !msg.on)) {
+        this.learning = false;
+        this.learnMode = 'map';
+        this.setShift(source, this.shift?.mode ?? 'hold');
+      }
+      return;
+    }
+    // The Shift button updates shiftActive whether learning or playing, so holding/toggling Shift
+    // while learning a mapping automatically tags that mapping as Shift without capturing the button.
+    if (this.shift && this.matches(this.shift.source, source)) {
+      this.handleShift(msg);
+      return;
+    }
     if (this.learning) {
       // A learn for a 14-bit pair or an NRPN hears only that; any other learn leaves them be.
       const hires = msg.type === 'cc14' || msg.type === 'nrpn';
@@ -1373,9 +1454,16 @@ class Mapper {
     const prev = this.edges.get(key) ?? { value: 0, at: -Infinity };
     this.edges.set(key, { value: msg.value, at: now });
     this.fb.seen.set(AddOnLogic.sourceKey({ ...source, device: null, channel: null }), { device: source.device, channel: source.channel });
+    // When Shift is active, Shift-tagged mappings win for a source; unshifted mappings still fall
+    // through for controls that have no Shift mapping. When Shift is off, Shift mappings stay idle.
+    const pickShift = (list) => {
+      if (!this.shiftActive) return list.filter((m) => !m.shift);
+      const shifted = list.filter((m) => m.shift);
+      return shifted.length ? shifted : list.filter((m) => !m.shift);
+    };
     // The focused plugin's map is a layer on top: where it uses a source, it alone gets it.
-    const layer = this.activePluginMappings().filter((m) => this.matches(m.source, source));
-    const targets = layer.length ? layer : this.all().filter((m) => m.scope !== 'plugin' && this.matches(m.source, source));
+    const layer = pickShift(this.activePluginMappings().filter((m) => this.matches(m.source, source)));
+    const targets = layer.length ? layer : pickShift(this.all().filter((m) => m.scope !== 'plugin' && this.matches(m.source, source)));
     for (const m of targets) {
       if (m.feedback) {
         // The motor's echo of a value we just sent is not the user's hand.
@@ -1406,6 +1494,12 @@ class Mapper {
    */
   assign(source) {
     if (!source) return false;
+    if (this.learning && this.learnMode === 'shift') {
+      this.learning = false;
+      this.learnMode = 'map';
+      this.setShift(source, this.shift?.mode ?? 'hold');
+      return true;
+    }
     this.learning = true;
     this.pending.source = source;
     const had = this.pending.target !== undefined;
@@ -1432,14 +1526,15 @@ class Mapper {
       invert: false,
       scope: plugin ? 'plugin' : mighty ? 'mighty' : focus ? 'focus' : 'session',
     };
+    if (!mighty && this.shiftActive) mapping.shift = true;
     if (plugin) {
       // A plugin map is a layer over the others: the same knob can mean different parameters for
       // different plugins, so only this plugin's map gives up the source.
       mapping.mode = entry?.switch ? 'toggle' : 'absolute';
       if (source.type === 'cc' || source.type === 'note') mapping.feedback = true;
       this.learnOptionsInto(mapping);
-      const key = AddOnLogic.sourceKey(source);
-      this.pluginMappings = this.pluginMappings.filter((m) => !(m.target.pluginId === target.pluginId && (AddOnLogic.sourceKey(m.source) === key || m.target.param === target.param)));
+      const key = AddOnLogic.mappingKey(mapping);
+      this.pluginMappings = this.pluginMappings.filter((m) => !(m.target.pluginId === target.pluginId && (AddOnLogic.mappingKey(m) === key || m.target.param === target.param)));
       this.pluginMappings.push(mapping);
       this.lastLearned = mapping.id;
       this.pending = { target: undefined, source: undefined };
@@ -1460,10 +1555,10 @@ class Mapper {
     // Channel Focus is a dedicated channel controller: its knobs should follow the focused track.
     if (focus && (source.type === 'cc' || source.type === 'note')) mapping.feedback = true;
     this.learnOptionsInto(mapping);
-    // One source drives one target, across regular and Channel Focus mappings: learning a source
-    // again moves it.
-    const key = AddOnLogic.sourceKey(source);
-    const other = (m) => AddOnLogic.sourceKey(m.source) !== key;
+    // One source+layer drives one target, across regular and Channel Focus mappings: learning a
+    // source again on the same layer moves it, while Normal and Shift can share the same button.
+    const key = AddOnLogic.mappingKey(mapping);
+    const other = (m) => AddOnLogic.mappingKey(m) !== key;
     this.sessionMappings = this.sessionMappings.filter(other);
     this.globalMappings = this.globalMappings.filter(other);
     this.focusMappings = this.focusMappings.filter(other);
@@ -1497,14 +1592,14 @@ class Mapper {
     if (takeover && mapping.mode === 'absolute') mapping.takeover = true;
   }
 
-  /** Session mappings shadow global ones on the same source. */
+  /** Session mappings shadow global ones on the same source and shift layer. */
   all() {
-    const keys = new Set(this.sessionMappings.map((m) => AddOnLogic.sourceKey(m.source)));
-    const globals = this.globalMappings.filter((m) => !keys.has(AddOnLogic.sourceKey(m.source)));
-    for (const m of globals) keys.add(AddOnLogic.sourceKey(m.source));
-    const focus = this.focusMappings.filter((m) => !keys.has(AddOnLogic.sourceKey(m.source)));
-    for (const m of focus) keys.add(AddOnLogic.sourceKey(m.source));
-    const mighty = this.mighty && !keys.has(AddOnLogic.sourceKey(this.mighty.source)) ? [this.mighty] : [];
+    const keys = new Set(this.sessionMappings.map((m) => AddOnLogic.mappingKey(m)));
+    const globals = this.globalMappings.filter((m) => !keys.has(AddOnLogic.mappingKey(m)));
+    for (const m of globals) keys.add(AddOnLogic.mappingKey(m));
+    const focus = this.focusMappings.filter((m) => !keys.has(AddOnLogic.mappingKey(m)));
+    for (const m of focus) keys.add(AddOnLogic.mappingKey(m));
+    const mighty = this.mighty && !keys.has(AddOnLogic.mappingKey(this.mighty)) ? [this.mighty] : [];
     return [...this.sessionMappings, ...globals, ...focus, ...mighty, ...this.pluginMappings];
   }
 
@@ -1517,6 +1612,7 @@ class Mapper {
     if (this.sessionStore?.available) this.sessionStore.set('session', this.sessionMappings);
     else this.storage.set(this.sessionKey, this.sessionMappings);
     this.storage.set(KEYS.globals, this.globalMappings);
+    this.storage.set(KEYS.shift, this.shift);
     for (const kind of SESSION_KINDS) this.writeKind(kind);
   }
 
@@ -1538,11 +1634,13 @@ class Mapper {
     Object.assign(m, rest);
     this.pickup.delete(id); // a changed mapping picks its knob up afresh
     if (m.mode === 'relative') delete m.feedback;
+    if (rest.shift === false) delete m.shift;
     if (source) m.source = { ...m.source, ...source };
+    const rekeyed = !!source || rest.shift !== undefined;
     if (m.scope === 'plugin') {
-      // Within one plugin's map, a source drives one parameter.
-      const key = AddOnLogic.sourceKey(m.source);
-      if (source) this.pluginMappings = this.pluginMappings.filter((x) => x === m || x.target.pluginId !== m.target.pluginId || AddOnLogic.sourceKey(x.source) !== key);
+      // Within one plugin's map, a source+layer drives one parameter.
+      const key = AddOnLogic.mappingKey(m);
+      if (rekeyed) this.pluginMappings = this.pluginMappings.filter((x) => x === m || x.target.pluginId !== m.target.pluginId || AddOnLogic.mappingKey(x) !== key);
       this.save();
       if (rest.feedback === true) {
         this.fb.sent.delete(id);
@@ -1550,9 +1648,9 @@ class Mapper {
       }
       return this.emit();
     }
-    // A source drives one target: moving this mapping onto another's source replaces that one.
-    const key = AddOnLogic.sourceKey(m.source);
-    const others = (x) => x.id === id || !(source && AddOnLogic.sourceKey(x.source) === key);
+    // A source+layer drives one target: moving this mapping onto another's source+layer replaces that one.
+    const key = AddOnLogic.mappingKey(m);
+    const others = (x) => x.id === id || !(rekeyed && AddOnLogic.mappingKey(x) === key);
     this.sessionMappings = this.sessionMappings.filter(others);
     this.globalMappings = this.globalMappings.filter(others);
     this.focusMappings = this.focusMappings.filter(others);
@@ -1618,6 +1716,7 @@ class Mapper {
           active,
           focus: false,
           global: false,
+          shift: !!m.shift,
           movedAt: this.activity.get(m.id) ?? 0,
         };
       }
@@ -1639,6 +1738,7 @@ class Mapper {
           automation: true,
           focus: m.scope === 'focus',
           global: m.scope === 'global',
+          shift: !!m.shift,
           movedAt: this.activity.get(m.id) ?? 0,
         };
       }
@@ -1677,6 +1777,7 @@ class Mapper {
           missingWhy: `not on ${name}`,
           focus: true,
           global: false,
+          shift: !!m.shift,
           movedAt: this.activity.get(m.id) ?? 0,
         };
       }
@@ -1693,6 +1794,7 @@ class Mapper {
         missingWhy: 'not in this session',
         focus: false,
         global: m.scope === 'global',
+        shift: !!m.shift,
         movedAt: this.activity.get(m.id) ?? 0,
       };
     });
@@ -1942,10 +2044,12 @@ class Mapper {
   feedback(id, { force = false } = {}) {
     const m = this.find(id);
     if (!m || !m.feedback || !this.send || !this.canFeedback(m)) return false;
+    if (m.shift && !this.shiftActive) return false;
+    const srcNoDev = AddOnLogic.sourceKey({ ...m.source, device: null });
+    if (!m.shift && this.shiftActive && this.all().some((x) => x.shift && AddOnLogic.sourceKey({ ...x.source, device: null }) === srcNoDev)) return false;
     // While the focused plugin's map owns a knob, nothing below it moves that knob.
     if (m.scope !== 'plugin') {
-      const key = AddOnLogic.sourceKey({ ...m.source, device: null });
-      if (this.activePluginMappings().some((p) => AddOnLogic.sourceKey({ ...p.source, device: null }) === key)) return false;
+      if (this.activePluginMappings().some((p) => AddOnLogic.sourceKey({ ...p.source, device: null }) === srcNoDev && (!!p.shift === this.shiftActive || !p.shift))) return false;
     }
     const automation = m.target.kind === 'automation';
     const entry = automation ? undefined : this.entryFor(m.target);
@@ -2024,6 +2128,7 @@ class Mapper {
       focus: copy(this.focusMappings),
       mighty: this.mighty ? { ...this.mighty } : null,
       plugins: copy(this.pluginMappings),
+      shift: this.shift ? { ...this.shift, source: { ...this.shift.source } } : null,
     });
     list.sort((a, b) => a.name.localeCompare(b.name));
     this.storage.set(KEYS.templates, list);
@@ -2050,8 +2155,8 @@ class Mapper {
     const fresh = (src) => `${src.id}_${(n++).toString(36)}${this.now().toString(36)}`;
     const merge = (list, items, scope) => {
       for (const src of items ?? []) {
-        const key = AddOnLogic.sourceKey(src.source);
-        const same = scope === 'plugin' ? (m) => m.target.pluginId === src.target.pluginId && AddOnLogic.sourceKey(m.source) === key : (m) => AddOnLogic.sourceKey(m.source) === key;
+        const key = AddOnLogic.mappingKey(src);
+        const same = scope === 'plugin' ? (m) => m.target.pluginId === src.target.pluginId && AddOnLogic.mappingKey(m) === key : (m) => AddOnLogic.mappingKey(m) === key;
         list = list.filter((m) => !same(m));
         list.push({ ...src, scope, id: fresh(src) });
       }
@@ -2063,12 +2168,16 @@ class Mapper {
     if (t.mighty) {
       this.mighty = { ...t.mighty, scope: 'mighty', id: fresh(t.mighty) };
     }
+    if (t.shift !== undefined) {
+      this.shift = t.shift ? { ...t.shift, source: { ...t.shift.source } } : null;
+      if (!this.shift) this.shiftActive = false;
+    }
     for (const src of t.mappings ?? []) {
       const entry = this.entryFor(src.target);
       const target = entry ? AddOnLogic.targetOf(entry) : src.target;
       if (!entry && target.kind === 'control') void this.ensure(this.pathFor(target)).catch(() => {});
-      const key = AddOnLogic.sourceKey(src.source);
-      this.sessionMappings = this.sessionMappings.filter((m) => AddOnLogic.sourceKey(m.source) !== key);
+      const key = AddOnLogic.mappingKey(src);
+      this.sessionMappings = this.sessionMappings.filter((m) => AddOnLogic.mappingKey(m) !== key);
       this.sessionMappings.push({ ...src, target, scope: 'session', id: fresh(src) });
     }
     this.save();
@@ -2087,7 +2196,7 @@ class Mapper {
 
   /** Templates and globals as one JSON document, for backing up or sharing. */
   exportAll() {
-    return { format: 'midi-learn', version: 1, templates: this.templates(), globals: this.globalMappings, focus: this.focusMappings, mighty: this.mighty, plugins: this.pluginMappings };
+    return { format: 'midi-learn', version: 1, templates: this.templates(), globals: this.globalMappings, focus: this.focusMappings, mighty: this.mighty, plugins: this.pluginMappings, shift: this.shift };
   }
 
   /** Merge an exported document: templates by name, globals by source. */
@@ -2097,19 +2206,23 @@ class Mapper {
     for (const t of doc.templates ?? []) byName.set(t.name, t);
     this.storage.set(KEYS.templates, [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)));
     for (const g of doc.globals ?? []) {
-      const key = AddOnLogic.sourceKey(g.source);
-      this.globalMappings = this.globalMappings.filter((m) => AddOnLogic.sourceKey(m.source) !== key);
+      const key = AddOnLogic.mappingKey(g);
+      this.globalMappings = this.globalMappings.filter((m) => AddOnLogic.mappingKey(m) !== key);
       this.globalMappings.push({ ...g, scope: 'global' });
     }
     if (doc.mighty) this.mighty = { ...doc.mighty, scope: 'mighty' };
+    if (doc.shift !== undefined) {
+      this.shift = doc.shift ? { ...doc.shift, source: { ...doc.shift.source } } : null;
+      if (!this.shift) this.shiftActive = false;
+    }
     for (const pm of doc.plugins ?? []) {
-      const key = AddOnLogic.sourceKey(pm.source);
-      this.pluginMappings = this.pluginMappings.filter((m) => !(m.target.pluginId === pm.target.pluginId && AddOnLogic.sourceKey(m.source) === key));
+      const key = AddOnLogic.mappingKey(pm);
+      this.pluginMappings = this.pluginMappings.filter((m) => !(m.target.pluginId === pm.target.pluginId && AddOnLogic.mappingKey(m) === key));
       this.pluginMappings.push({ ...pm, scope: 'plugin' });
     }
     for (const f of doc.focus ?? []) {
-      const key = AddOnLogic.sourceKey(f.source);
-      this.focusMappings = this.focusMappings.filter((m) => AddOnLogic.sourceKey(m.source) !== key);
+      const key = AddOnLogic.mappingKey(f);
+      this.focusMappings = this.focusMappings.filter((m) => AddOnLogic.mappingKey(m) !== key);
       this.focusMappings.push({ ...f, scope: 'focus' });
     }
     this.save();

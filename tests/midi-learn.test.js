@@ -1746,3 +1746,135 @@ describe('pan on mono and stereo channels', () => {
     expect(logic.resolve(mono, target('balance')).name).toBe('pan');
   });
 });
+
+describe('Shift modifier', () => {
+  async function shiftSetup() {
+    let clock = 1000;
+    const storage = logic.memoryStore();
+    const engine = new Luna.MockEngine();
+    engine.addSession('abc', { name: 'Demo', tracks: ['Vocal', 'Bass'], packageUid: 'pkg_abc' });
+    await engine.settled();
+    const luna = await Luna.connect({ port_: engine.port() });
+    const session = await luna.session();
+    const mapper = new logic.Mapper(session, { storage, now: () => clock });
+    await mapper.start();
+    const settle = async () => {
+      await mapper.settled();
+      await engine.settled();
+      await luna.settled();
+    };
+    const tick = (ms = 300) => { clock += ms; };
+    return { engine, luna, session, mapper, storage, settle, tick };
+  }
+
+  it('Hold mode lets one button run two different functions (Normal vs Shift) and falls through for unshifted controls', async () => {
+    const { engine, mapper, settle, tick } = await shiftSetup();
+    // Learn CC 64 as Shift (defaults to Hold mode)
+    mapper.setLearning(true, 'shift');
+    mapper.midi(CC(64, 127), 'MPK');
+    expect(mapper.learning).toBe(false);
+    expect(mapper.shift).toMatchObject({ mode: 'hold', source: { type: 'cc', number: 64, device: 'MPK' } });
+
+    // Map CC 76 Normal -> Play, CC 77 Normal -> Stop, Shift + CC 76 -> Loop
+    mapper.pick(logic.commandTarget('play'));
+    mapper.midi(CC(76, 127), 'MPK');
+    mapper.pick(logic.commandTarget('stop'));
+    mapper.midi(CC(77, 127), 'MPK');
+    // Hold Shift while learning: Shift button is not captured, and the new mapping gets shift: true
+    mapper.pick(logic.commandTarget('toggleLoop'));
+    mapper.midi(CC(64, 127), 'MPK');
+    expect(mapper.shiftActive).toBe(true);
+    expect(mapper.learning).toBe(true);
+    mapper.midi(CC(76, 127), 'MPK');
+    expect(mapper.learning).toBe(false);
+    mapper.midi(CC(64, 0), 'MPK');
+    expect(mapper.shiftActive).toBe(false);
+    expect(mapper.rows().map((r) => [r.target, r.shift])).toEqual([['Play', false], ['Stop', false], ['Loop on / off', true]]);
+
+    // Normal press of CC 76 -> Play (not Loop)
+    tick();
+    mapper.midi(CC(76, 127), 'MPK');
+    await settle();
+    expect(engine.value('/sessions/abc', 'playing')).toBe(true);
+    expect(engine.value('/sessions/abc', 'looping')).toBe(false);
+
+    // Hold Shift + press CC 76 -> Loop (not Play)
+    tick();
+    mapper.midi(CC(64, 127), 'MPK');
+    mapper.midi(CC(76, 127), 'MPK');
+    await settle();
+    expect(engine.value('/sessions/abc', 'looping')).toBe(true);
+
+    // Unshifted CC 77 (Stop) still falls through while Shift is held
+    tick();
+    mapper.midi(CC(77, 127), 'MPK');
+    await settle();
+    expect(engine.value('/sessions/abc', 'playing')).toBe(false);
+
+    // Release Shift -> CC 76 runs Play again
+    mapper.midi(CC(64, 0), 'MPK');
+    tick();
+    mapper.midi(CC(76, 127), 'MPK');
+    await settle();
+    expect(engine.value('/sessions/abc', 'playing')).toBe(true);
+  });
+
+  it('Toggle mode latches Shift on and off, including for one-shot CC buttons without 0 release', async () => {
+    const { engine, mapper, settle, tick } = await shiftSetup();
+    mapper.setShift({ device: 'MPK', type: 'cc', channel: 1, number: 64 }, 'toggle');
+    mapper.pick(logic.commandTarget('play'));
+    mapper.midi(CC(76, 127), 'MPK');
+    mapper.setShiftActive(true);
+    mapper.pick(logic.commandTarget('toggleLoop'));
+    mapper.midi(CC(76, 127), 'MPK');
+    mapper.setShiftActive(false);
+
+    // Press Shift once (one-shot CC 127) -> Shift latches ON
+    tick();
+    mapper.midi(CC(64, 127), 'MPK');
+    expect(mapper.shiftActive).toBe(true);
+    tick();
+    mapper.midi(CC(76, 127), 'MPK');
+    await settle();
+    expect(engine.value('/sessions/abc', 'looping')).toBe(true);
+    expect(engine.value('/sessions/abc', 'playing')).toBe(false);
+
+    // Press Shift again after quiet gap -> Shift latches OFF
+    tick();
+    mapper.midi(CC(64, 127), 'MPK');
+    expect(mapper.shiftActive).toBe(false);
+    tick();
+    mapper.midi(CC(76, 127), 'MPK');
+    await settle();
+    expect(engine.value('/sessions/abc', 'playing')).toBe(true);
+  });
+
+  it('persists Shift settings across reload, templates, and export/import', async () => {
+    const { session, mapper, storage } = await shiftSetup();
+    mapper.setShift({ device: 'MPK', type: 'note', channel: 1, number: 60 }, 'toggle');
+    mapper.pick(logic.commandTarget('play'));
+    mapper.midi(CC(76, 127), 'MPK');
+    mapper.setShiftActive(true);
+    mapper.pick(logic.commandTarget('stop'));
+    mapper.midi(CC(76, 127), 'MPK');
+    mapper.saveTemplate('MPK Shift');
+
+    // Reload from storage
+    const reloaded = new logic.Mapper(session, { storage });
+    await reloaded.start();
+    expect(reloaded.shift).toEqual({ mode: 'toggle', source: { device: 'MPK', type: 'note', channel: 1, number: 60 } });
+    expect(reloaded.rows().map((r) => [r.target, r.shift])).toEqual([['Play', false], ['Stop', true]]);
+
+    // Export / import into a fresh mapper
+    const doc = JSON.parse(JSON.stringify(mapper.exportAll()));
+    const fresh = new logic.Mapper(session, { storage: logic.memoryStore() });
+    await fresh.start();
+    fresh.importAll(doc);
+    expect(fresh.shift).toMatchObject({ mode: 'toggle', source: { type: 'note', number: 60 } });
+    fresh.clearShift();
+    expect(fresh.shift).toBeNull();
+    fresh.applyTemplate('MPK Shift');
+    expect(fresh.shift).toMatchObject({ mode: 'toggle', source: { type: 'note', number: 60 } });
+    expect(fresh.rows().map((r) => [r.target, r.shift])).toEqual([['Play', false], ['Stop', true]]);
+  });
+});

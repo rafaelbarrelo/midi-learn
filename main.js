@@ -296,6 +296,7 @@ function schedule() {
 
 function paint() {
   paintSessionSwitches();
+  paintShift();
   paintLearn();
   paintMonitor();
   paintMaps();
@@ -322,7 +323,10 @@ function paintLearn() {
   if (mapper?.lastLearned && mapper.lastLearned !== announced) {
     announced = mapper.lastLearned;
     const r = mapper.rows().find((x) => x.mapping.id === announced);
-    if (r) toast(r.plugin ? `Plugins: ${r.source} → ${r.target} (${r.mapping.target.pluginName}, any instance)` : r.mighty ? `Click & Turn: ${r.source}. Click any control in LUNA` : r.focus ? `Channel Focus: ${r.source} → ${r.target} (${r.where})` : `Mapped ${r.source} → ${r.target} (${r.where})`);
+    if (r) {
+      const src = r.shift ? `Shift + ${r.source}` : r.source;
+      toast(r.plugin ? `Plugins: ${src} → ${r.target} (${r.mapping.target.pluginName}, any instance)` : r.mighty ? `Click & Turn: ${r.source}. Click any control in LUNA` : r.focus ? `Channel Focus: ${src} → ${r.target} (${r.where})` : `Mapped ${src} → ${r.target} (${r.where})`);
+    }
     setTimeout(() => {
       if (mapper?.lastLearned === announced) {
         mapper.lastLearned = undefined;
@@ -386,20 +390,21 @@ $('cmd-toggle').onclick = () => setCmdList($('cmd-list').hidden);
 function paintLearnBar(on) {
   const bar = $('learnbar');
   const mode = mapper?.learnMode ?? 'map';
-  bar.hidden = !on;
+  const showBar = on && mode !== 'shift';
+  bar.hidden = !showBar;
   bar.classList.toggle('proxy', mode === 'mighty');
   bar.classList.toggle('no-cmd', mode !== 'map');
-  if (!on || mode !== 'map') setCmdList(false);
-  const done = on && mapper?.latch ? 'Stop' : 'Done';
+  if (!showBar || mode !== 'map') setCmdList(false);
+  const done = showBar && mapper?.latch ? 'Stop' : 'Done';
   // Hold sits just right of the learning section's Learn button, only while it learns. Click & Turn
   // is one knob, so it has no Hold.
   const hold = $('learn-hold');
   const pill = document.querySelector(`.learn-pill[data-learn="${mode}"]`);
-  hold.hidden = !(on && mode !== 'mighty' && pill);
+  hold.hidden = !(showBar && mode !== 'mighty' && pill);
   if (!hold.hidden && pill.nextElementSibling !== hold) pill.after(hold);
-  hold.setAttribute('aria-pressed', String(!!(on && mapper?.latch)));
+  hold.setAttribute('aria-pressed', String(!!(showBar && mapper?.latch)));
   if ($('learn-done').textContent !== done) $('learn-done').textContent = done;
-  if (on) {
+  if (showBar) {
     const body = $(LEARN_SECTIONS[mode])?.querySelector(':scope > .body');
     if (body && bar.parentElement !== body) body.insertBefore(bar, body.firstChild);
     // Learning in a folded section opens it, so the learn bar is in view.
@@ -473,6 +478,7 @@ function toggleHelp(open = $('help').hidden) {
   if (open) {
     closeColors();
     closeTemplates();
+    closeShift();
   }
   $('help').hidden = !open;
 }
@@ -829,6 +835,7 @@ function paintRow(li, r) {
   const q = (sel) => li.querySelector(sel);
   const set = (el, attr, value) => el && el.getAttribute(attr) !== value && el.setAttribute(attr, value);
   q('.tag.fb').hidden = !m.feedback;
+  q('.tag.shift').hidden = !r.shift;
   q('.tag.global').hidden = !r.global;
   const mode = MODES[m.mode] ?? m.mode;
   if (q('.tag.mode').textContent !== mode) q('.tag.mode').textContent = mode;
@@ -836,6 +843,7 @@ function paintRow(li, r) {
   li.querySelectorAll('.mode-seg button').forEach((b) => set(b, 'aria-pressed', String(modeIs(m, b.dataset.mode))));
   set(q('.inv'), 'aria-pressed', String(!!m.invert));
   set(q('.fb'), 'aria-pressed', String(!!m.feedback));
+  set(q('.shf'), 'aria-pressed', String(!!r.shift));
   set(q('.glob'), 'aria-pressed', String(r.global));
   const dev = q('.dev');
   if (dev && document.activeElement !== dev && dev.value !== (m.source.device ?? '')) dev.value = m.source.device ?? '';
@@ -945,13 +953,13 @@ function buildList(state, list, total) {
         <span class="src" title="${esc(`${r.source}, channel ${r.channel}${r.device ? `, ${r.device}` : ', any input'}`)}">${esc(r.source)}</span>
         <span class="tgt"><b>${esc(r.target)}</b><small>${esc(r.missing ? `${r.where} · ${r.missingWhy}` : r.where)}</small></span>
         <span class="val">${isControl ? `<span class="d">${esc(r.display)}</span>${continuous ? '<span class="meter"><i></i></span>' : ''}` : r.automation ? `<span class="d">${esc(r.display)}</span>` : ''}</span>
-        <span class="tags"><span class="tag fb" title="Feedback on: the controller follows LUNA"${m.feedback ? '' : ' hidden'}>${FB_ICON}</span><span class="tag global"${r.global ? '' : ' hidden'}>Global</span><span class="tag mode">${MODES[m.mode] ?? m.mode}</span><button class="more" aria-label="Edit mapping" aria-expanded="${openRows.has(m.id)}">${CHEVRON}</button><button class="x" aria-label="Delete mapping">${X}</button></span>
+        <span class="tags"><span class="tag fb" title="Feedback on: the controller follows LUNA"${m.feedback ? '' : ' hidden'}>${FB_ICON}</span><span class="tag shift" title="Active when Shift is on"${r.shift ? '' : ' hidden'}>Shift</span><span class="tag global"${r.global ? '' : ' hidden'}>Global</span><span class="tag mode">${MODES[m.mode] ?? m.mode}</span><button class="more" aria-label="Edit mapping" aria-expanded="${openRows.has(m.id)}">${CHEVRON}</button><button class="x" aria-label="Delete mapping">${X}</button></span>
       </div>
       <div class="edit">
         <div class="lbl">MIDI<span class="line src-line"><select class="s-type" aria-label="Message">${[['cc', 'CC'], ['note', 'Note'], ['pitch', 'Bend'], ['program', 'Program']].map(([k, v]) => `<option value="${k}"${m.source.type === k ? ' selected' : ''}>${v}</option>`).join('')}</select><input class="s-num" inputmode="numeric" maxlength="4" aria-label="Number" value="${esc(m.source.type === 'pitch' ? '' : m.source.type === 'note' ? AddOnLogic.noteName(m.source.number) : m.source.type === 'program' ? m.source.number + 1 : m.source.number)}"${m.source.type === 'pitch' ? ' disabled' : ''}><select class="s-ch" aria-label="Channel"><option value="">Any ch</option>${Array.from({ length: 16 }, (_, i) => `<option value="${i + 1}"${m.source.channel === i + 1 ? ' selected' : ''}>Ch ${i + 1}</option>`).join('')}</select></span></label>
         ${isControl || buttonTarget ? `<div class="lbl">Mode<span class="line"><span class="segments mode-seg">${['absolute', 'toggle'].map((k) => `<button data-mode="${k}" aria-pressed="${modeIs(m, k)}" title="${MODE_TIPS[k]}">${MODES[k]}</button>`).join('')}</span></span></div>` : ''}
         ${continuous ? `<div class="lbl">Range<span class="range"><b class="lo">${Math.round(m.min * 127)}</b><span class="rail"><span class="track"><i class="fill"></i><button type="button" class="cap" data-end="lo" role="slider" aria-label="Lowest value" aria-valuemin="0" aria-valuemax="127"></button><button type="button" class="cap" data-end="hi" role="slider" aria-label="Highest value" aria-valuemin="0" aria-valuemax="127"></button></span></span><b class="hi">${Math.round(m.max * 127)}</b></span></div>` : ''}
-        <div class="lbl">Options<span class="line">${continuous ? `<button class="switch inv" aria-pressed="${!!m.invert}"><i></i>Invert</button>` : ''}${r.focus || r.plugin ? '' : `<button class="switch glob" aria-pressed="${r.global}" title="A global mapping works in every session"><i></i>Global</button>`}${mapper.canFeedback(m) ? `<button class="switch fb" aria-pressed="${!!m.feedback}" title="Send LUNA's value back to the controller, so motorized knobs and button lights follow"><i></i>Feedback</button>` : ''}</span></div>
+        <div class="lbl">Options<span class="line">${continuous ? `<button class="switch inv" aria-pressed="${!!m.invert}"><i></i>Invert</button>` : ''}<button class="switch shf" aria-pressed="${!!r.shift}" title="Active only when Shift is on (lets one button have two functions)"><i></i>Shift</button>${r.focus || r.plugin ? '' : `<button class="switch glob" aria-pressed="${r.global}" title="A global mapping works in every session"><i></i>Global</button>`}${mapper.canFeedback(m) ? `<button class="switch fb" aria-pressed="${!!m.feedback}" title="Send LUNA's value back to the controller, so motorized knobs and button lights follow"><i></i>Feedback</button>` : ''}</span></div>
         <div class="lbl" title="The MIDI input this mapping listens to, and where its feedback goes">Device<span class="line"><select class="dev">${[...new Set([m.source.device, ...midiIn.inputs].filter(Boolean))].map((n) => `<option value="${esc(n)}"${m.source.device === n ? ' selected' : ''}>${esc(n)}</option>`).join('')}<option value=""${m.source.device === null ? ' selected' : ''}>Any input</option></select></span></div>
       </div>`;
     const q = (s) => li.querySelector(s);
@@ -975,6 +983,7 @@ function buildList(state, list, total) {
     };
     li.querySelectorAll('.mode-seg button').forEach((b) => (b.onclick = () => mapper.update(m.id, { mode: b.dataset.mode })));
     if (q('.inv')) q('.inv').onclick = () => flip(q('.inv'), () => ({ invert: !m.invert }));
+    if (q('.shf')) q('.shf').onclick = () => flip(q('.shf'), () => ({ shift: !m.shift }));
     if (q('.fb'))
       q('.fb').onclick = () => {
         flip(q('.fb'), () => ({ feedback: !m.feedback }));
@@ -1169,6 +1178,7 @@ window.addEventListener(
       if (!$('help').hidden) return toggleHelp(false);
       if (colorsEl) return closeColors();
       if (templatesEl) return closeTemplates();
+      if (shiftEl) return closeShift();
       if (mapper?.learning) {
         mapper.setLearning(false);
         e.preventDefault();
@@ -1181,11 +1191,61 @@ window.addEventListener(
   true,
 );
 
+// ---- Shift modifier -----------------------------------------------------------------------
+let shiftEl = null;
+function openShift() {
+  if (shiftEl) return closeShift();
+  closeColors();
+  closeTemplates();
+  shiftEl = document.createElement('div');
+  shiftEl.className = 'pop shift-pop';
+  shiftEl.setAttribute('role', 'dialog');
+  shiftEl.setAttribute('aria-label', 'Shift modifier');
+  document.body.appendChild(shiftEl);
+  paintShift();
+}
+function closeShift() {
+  if (mapper?.learning && mapper.learnMode === 'shift') mapper.setLearning(false);
+  shiftEl?.remove();
+  shiftEl = null;
+}
+function paintShift() {
+  const pill = $('shift-pill');
+  const s = mapper?.shift;
+  const active = !!mapper?.shiftActive;
+  const learning = !!mapper?.learning && mapper.learnMode === 'shift';
+  pill.setAttribute('aria-pressed', String(active));
+  const label = s ? `Shift · ${AddOnLogic.sourceLabel(s.source)}` : 'Shift';
+  if (pill.textContent !== label) pill.textContent = label;
+  if (!shiftEl || !mapper) return;
+  const mode = s?.mode ?? 'hold';
+  const sig = JSON.stringify([s, active, learning]);
+  if (shiftEl.dataset.sig === sig) return;
+  shiftEl.dataset.sig = sig;
+  shiftEl.innerHTML = `
+    <div><h4>Shift modifier</h4><p class="note">Assign a MIDI button as Shift so any other button or knob can have two functions (Normal and Shift). Turn Shift on while learning to map the Shift function.</p></div>
+    <div class="s-row"><span>Button</span><span class="s-btn"><b>${esc(s ? AddOnLogic.sourceLabel(s.source) : 'None')}</b><button class="pill learn-pill" id="sh-learn" aria-pressed="${learning}">${learning ? 'Press button…' : s ? 'Relearn' : 'Learn'}</button>${s ? `<button class="x" id="sh-clear" aria-label="Clear Shift button">${X}</button>` : ''}</span></div>
+    <div class="s-row"><span>Mode</span><span class="segments" id="sh-mode"><button data-m="hold" aria-pressed="${mode === 'hold'}" title="Shift is active while you hold the button">Hold</button><button data-m="toggle" aria-pressed="${mode === 'toggle'}" title="Press once to turn Shift on, press again to turn it off">Toggle</button></span></div>
+    <div class="s-row"><span>Layer</span><button class="switch" id="sh-active" aria-pressed="${active}"><i></i>Shift ${active ? 'on' : 'off'}</button></div>`;
+  shiftEl.querySelector('#sh-learn').onclick = () => {
+    if (mapper.learning && mapper.learnMode === 'shift') mapper.setLearning(false);
+    else mapper.setLearning(true, 'shift');
+  };
+  if (shiftEl.querySelector('#sh-clear')) shiftEl.querySelector('#sh-clear').onclick = () => mapper.clearShift();
+  shiftEl.querySelectorAll('#sh-mode button').forEach((b) => (b.onclick = () => mapper.setShiftMode(b.dataset.m)));
+  shiftEl.querySelector('#sh-active').onclick = () => mapper.setShiftActive(!mapper.shiftActive);
+}
+$('shift-pill').onclick = (e) => {
+  e.stopPropagation();
+  openShift();
+};
+
 // ---- Templates ----------------------------------------------------------------------------
 let templatesEl = null;
 function openTemplates() {
   if (templatesEl) return closeTemplates();
   closeColors();
+  closeShift();
   templatesEl = document.createElement('div');
   templatesEl.className = 'pop templates';
   templatesEl.setAttribute('role', 'dialog');
@@ -1331,6 +1391,7 @@ function openColors() {
   if (colorsEl && !colorsEl.isConnected) colorsEl = null;
   if (colorsEl) return closeColors();
   closeTemplates();
+  closeShift();
   colorsEl = document.createElement('div');
   colorsEl.className = 'pop colors';
   colorsEl.setAttribute('role', 'dialog');
@@ -1452,6 +1513,7 @@ document.addEventListener('pointerdown', (e) => {
   if (!$('help').hidden && !$('help').contains(e.target) && e.target !== $('open-help')) toggleHelp(false);
   if (colorsEl && !colorsEl.contains(e.target) && e.target !== $('open-colors')) closeColors();
   if (templatesEl && !templatesEl.contains(e.target) && e.target !== $('open-templates')) closeTemplates();
+  if (shiftEl && !shiftEl.contains(e.target) && e.target !== $('shift-pill')) closeShift();
 });
 setColor(store.get('midilearn.color') ?? DEFAULT_COLOR, false);
 // The Look (Default | LUNA) was applied by the early script in index.html; from here it saves through the settings store.
